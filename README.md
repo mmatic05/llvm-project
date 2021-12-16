@@ -1,106 +1,288 @@
-# The LLVM Compiler Infrastructure
+# The llvm-mca pretty printer 
 
-This directory and its sub-directories contain source code for LLVM,
-a toolkit for the construction of highly optimized compilers,
-optimizers, and run-time environments.
+The [__LLVM-MCA__](https://llvm.org/docs/CommandGuide/llvm-mca.html) is a performance analysis tool that uses information available in LLVM to statically measure the performance of machine code in a specific CPU.
 
-The README briefly describes how to get started with building LLVM.
-For more information on how to contribute to the LLVM project, please
-take a look at the
-[Contributing to LLVM](https://llvm.org/docs/Contributing.html) guide.
+__example.c :__
 
-## Getting Started with the LLVM System
 
-Taken from https://llvm.org/docs/GettingStarted.html.
+```
+#include <stdio.h>
 
-### Overview
+int sum(int a, int b) { return a + b; }
 
-Welcome to the LLVM project!
+int main() {
 
-The LLVM project has multiple components. The core of the project is
-itself called "LLVM". This contains all of the tools, libraries, and header
-files needed to process intermediate representations and convert them into
-object files.  Tools include an assembler, disassembler, bitcode analyzer, and
-bitcode optimizer.  It also contains basic regression tests.
+  int e = 1;
+  int k = 5;
 
-C-like languages use the [Clang](http://clang.llvm.org/) front end.  This
-component compiles C, C++, Objective-C, and Objective-C++ code into LLVM bitcode
--- and from there into object files, using LLVM.
+  int s = sum(e, k);
+  printf("sum(%d,%d)=%d \n", e, k, s);
 
-Other components include:
-the [libc++ C++ standard library](https://libcxx.llvm.org),
-the [LLD linker](https://lld.llvm.org), and more.
+  return 0;
+}
+```
 
-### Getting the Source Code and Building LLVM
+```
+$ clang example.c -o example.ll -S -emit-llvm 
+$ llc example.ll -o example.s
+$ llvm-mca example.s 
+```
+```
+Iterations:        100
+Instructions:      2800
+Total Cycles:      2192
+Total uOps:        4500
 
-The LLVM Getting Started documentation may be out of date.  The [Clang
-Getting Started](http://clang.llvm.org/get_started.html) page might have more
-accurate information.
+Dispatch Width:    6
+uOps Per Cycle:    2.05
+IPC:               1.28
+Block RThroughput: 10.0
 
-This is an example work-flow and configuration to get and build the LLVM source:
 
-1. Checkout LLVM (including related sub-projects like Clang):
+Instruction Info:
+[1]: #uOps
+[2]: Latency
+[3]: RThroughput
+[4]: MayLoad
+[5]: MayStore
+[6]: HasSideEffects (U)
 
-     * ``git clone https://github.com/llvm/llvm-project.git``
+[1]    [2]    [3]    [4]    [5]    [6]    Instructions:
+ 3      2     1.00           *            pushq	%rbp
+ 1      1     0.25                        movq	%rsp, %rbp
+ 1      1     1.00           *            movl	%edi, -8(%rbp)
+ 1      1     1.00           *            movl	%esi, -4(%rbp)
+ 1      5     0.50    *                   movl	-8(%rbp), %eax
+ 2      6     0.50    *                   addl	-4(%rbp), %eax
+ 2      6     0.50    *                   popq	%rbp
+ 3      7     1.00                  U     retq
+ 3      2     1.00           *            pushq	%rbp
+ 1      1     0.25                        movq	%rsp, %rbp
+ 1      1     0.25                        subq	$16, %rsp
+ 1      1     1.00           *            movl	$0, -16(%rbp)
+ 1      1     1.00           *            movl	$1, -8(%rbp)
+ 1      1     1.00           *            movl	$5, -4(%rbp)
+ 1      5     0.50    *                   movl	-8(%rbp), %edi
+ 1      5     0.50    *                   movl	-4(%rbp), %esi
+ 4      3     1.00                        callq	sum
+ 1      1     1.00           *            movl	%eax, -12(%rbp)
+ 1      5     0.50    *                   movl	-8(%rbp), %esi
+ 1      5     0.50    *                   movl	-4(%rbp), %edx
+ 1      5     0.50    *                   movl	-12(%rbp), %ecx
+ 1      1     0.25                        movabsq	$.L.str, %rdi
+ 1      1     0.25                        movb	$0, %al
+ 4      3     1.00                        callq	printf
+ 1      0     0.17                        xorl	%eax, %eax
+ 1      1     0.25                        addq	$16, %rsp
+ 2      6     0.50    *                   popq	%rbp
+ 3      7     1.00                  U     retq
 
-     * Or, on windows, ``git clone --config core.autocrlf=false
-    https://github.com/llvm/llvm-project.git``
 
-2. Configure and build LLVM and Clang:
+Resources:
+[0]   - SKLDivider
+[1]   - SKLFPDivider
+[2]   - SKLPort0
+[3]   - SKLPort1
+[4]   - SKLPort2
+[5]   - SKLPort3
+[6]   - SKLPort4
+[7]   - SKLPort5
+[8]   - SKLPort6
+[9]   - SKLPort7
 
-     * ``cd llvm-project``
 
-     * ``cmake -S llvm -B build -G <generator> [options]``
+Resource pressure per iteration:
+[0]    [1]    [2]    [3]    [4]    [5]    [6]    [7]    [8]    [9]    
+ -      -     4.71   4.72   7.00   7.00   10.00  4.73   4.84   7.00   
 
-        Some common build system generators are:
+Resource pressure by instruction:
+[0]    [1]    [2]    [3]    [4]    [5]    [6]    [7]    [8]    [9]    Instructions:
+ -      -     0.27   0.44   0.60   0.01   1.00   0.27   0.02   0.39   pushq	%rbp
+ -      -     0.44   0.27    -      -      -     0.29    -      -     movq	%rsp, %rbp
+ -      -      -      -     0.02    -     1.00    -      -     0.98   movl	%edi, -8(%rbp)
+ -      -      -      -      -      -     1.00    -      -     1.00   movl	%esi, -4(%rbp)
+ -      -      -      -     0.96   0.04    -      -      -      -     movl	-8(%rbp), %eax
+ -      -     0.28   0.27   0.04   0.96    -     0.18   0.27    -     addl	-4(%rbp), %eax
+ -      -     0.27   0.29   0.01   0.99    -     0.28   0.16    -     popq	%rbp
+ -      -     0.12   0.49   0.39   0.61    -     0.39   1.00    -     retq
+ -      -     0.27   0.18   0.97   0.01   1.00   0.28   0.27   0.02   pushq	%rbp
+ -      -     0.18   0.28    -      -      -     0.27   0.27    -     movq	%rsp, %rbp
+ -      -     0.28   0.27    -      -      -     0.27   0.18    -     subq	$16, %rsp
+ -      -      -      -     0.01   0.01   1.00    -      -     0.98   movl	$0, -16(%rbp)
+ -      -      -      -     0.30    -     1.00    -      -     0.70   movl	$1, -8(%rbp)
+ -      -      -      -     0.01    -     1.00    -      -     0.99   movl	$5, -4(%rbp)
+ -      -      -      -     0.01   0.99    -      -      -      -     movl	-8(%rbp), %edi
+ -      -      -      -     0.68   0.32    -      -      -      -     movl	-4(%rbp), %esi
+ -      -     0.75   0.31   0.45    -     1.00   0.42   0.52   0.55   callq	sum
+ -      -      -      -     0.30   0.25   1.00    -      -     0.45   movl	%eax, -12(%rbp)
+ -      -      -      -     0.01   0.99    -      -      -      -     movl	-8(%rbp), %esi
+ -      -      -      -     0.99   0.01    -      -      -      -     movl	-4(%rbp), %edx
+ -      -      -      -     0.01   0.99    -      -      -      -     movl	-12(%rbp), %ecx
+ -      -     0.17   0.29    -      -      -     0.26   0.28    -     movabsq	$.L.str, %rdi
+ -      -     0.28   0.26    -      -      -     0.28   0.18    -     movb	$0, %al
+ -      -     0.89   0.35   0.06    -     1.00   0.54   0.22   0.94   callq	printf
+ -      -      -      -      -      -      -      -      -      -     xorl	%eax, %eax
+ -      -     0.12   0.29    -      -      -     0.28   0.31    -     addq	$16, %rsp
+ -      -     0.23   0.19   0.63   0.37    -     0.42   0.16    -     popq	%rbp
+ -      -     0.16   0.54   0.55   0.45    -     0.30   1.00    -     retq
+```
 
-        * ``Ninja`` --- for generating [Ninja](https://ninja-build.org)
-          build files. Most llvm developers use Ninja.
-        * ``Unix Makefiles`` --- for generating make-compatible parallel makefiles.
-        * ``Visual Studio`` --- for generating Visual Studio projects and
-          solutions.
-        * ``Xcode`` --- for generating Xcode projects.
 
-        Some common options:
+## The llvm-mca tool improvement  
 
-        * ``-DLLVM_ENABLE_PROJECTS='...'`` --- semicolon-separated list of the LLVM
-          sub-projects you'd like to additionally build. Can include any of: clang,
-          clang-tools-extra, compiler-rt,cross-project-tests, flang, libc, libclc,
-          libcxx, libcxxabi, libunwind, lld, lldb, mlir, openmp, polly, or pstl.
+The idea of improving the __llvm-mca tool__ is to introduce a __new option “-diff”__, that compares the statistics (results of the llvm-mca tool) to the attached assembler files. 
+```
+$ clang example.c -o example-O1.ll -S -emit-llvm -O1 
+$ llc example-O1.ll -o example-O1.s -O1
+$ clang example.c -o example-O2.ll -S -emit-llvm -O2 
+$ llc example-O2.ll -o example-O2.s -O2
+$ clang example.c -o example-O3.ll -S -emit-llvm -O3 
+$ llc example-O3.ll -o example-O3.s -O3
+$ llvm-mca example.s example-O1.s example-O2.s example-O3.s -diff
+```
+```
+Input files:  
+[f1]: example.s
+[f2]: example-O1.s
+[f3]: example-O2.s
+[f4]: example-O3.s
 
-          For example, to build LLVM, Clang, libcxx, and libcxxabi, use
-          ``-DLLVM_ENABLE_PROJECTS="clang;libcxx;libcxxabi"``.
+Iterations:  100
+                                   [f1]                          [f2]                          [f3]                          [f4]                          
+Instructions                       2800                          1200                          1200                          1200                          
+Total Cycles                       2192                          1096                          1096                          1096                          
+Total uOps                         4500                          2200                          2200                          2200                          
+Dispatch Width                     6                             6                             6                             6                             
+uOps Per Cycle                     2.050000                      2.010000                      2.010000                      2.010000                      
+IPC                                1.280000                      1.090000                      1.090000                      1.090000                      
+Block RThroughp                    10.000000                     3.670000                      3.670000                      3.670000                      
 
-        * ``-DCMAKE_INSTALL_PREFIX=directory`` --- Specify for *directory* the full
-          path name of where you want the LLVM tools and libraries to be installed
-          (default ``/usr/local``).
 
-        * ``-DCMAKE_BUILD_TYPE=type`` --- Valid options for *type* are Debug,
-          Release, RelWithDebInfo, and MinSizeRel. Default is Debug.
+Resource pressure per iteration:
+[0]    [1]    [2]    [3]    [4]    [5]    [6]    [7]    [8]    [9]    
+[f1]: 
+ -      -     4.71   4.72   7.00   7.00   10.00  4.73   4.84   7.00   
+[f2]: 
+ -      -     3.00   3.00   1.75   1.76   2.00   3.01   3.99   1.49   
+[f3]: 
+ -      -     3.00   3.00   1.75   1.76   2.00   3.01   3.99   1.49   
+[f4]: 
+ -      -     3.00   3.00   1.75   1.76   2.00   3.01   3.99   1.49   
+ 
+```
 
-        * ``-DLLVM_ENABLE_ASSERTIONS=On`` --- Compile with assertion checks enabled
-          (default is Yes for Debug builds, No for all other build types).
 
-      * ``cmake --build build [-- [options] <target>]`` or your build system specified above
-        directly.
+Restrictions on the number of input files have also been introduced, without the option “-diff”,
+mandatory and only one input file is allowed, while with the "-diff" option, more than one input 
+assembler file is required.
+```
+$ llvm-mca example.s
+$ llvm-mca example.s example-O1.s -diff
+$ llvm-mca example.s example-O1.s example-O2.s
+$ llvm-mca example.s example-O1.s example-O2.s example-O3.s -diff
+ ```     
+The reference to options “-o” and “-json” next to option “-diff” now refers to the output of the
+comparison of input files, which is a consequence of option “-diff”.
+```
+$ llvm-mca example.s example-O1.s example-O2.s example-O3.s -diff -json
+$ llvm-mca example.s example-O1.s example-O2.s example-O3.s -diff -o OutputFileName.txt
+$ llvm-mca example.s example-O1.s example-O2.s example-O3.s -diff -json -o OutputFileName.json
+```
+```
+{
+  "File: 1": {
+    "Block RThroughput": 10,
+    "Dispatch Width": 6,
+    "IPC": 1.2773722627737227,
+    "Instructions": 2800,
+    "Iterations": 100,
+    "Name": "example.s",
+    "Resource pressure per iteration": " - ,  - , 4.715000, 4.725000, 7.005000, 7.005000, 10.005000, 4.735000, 4.845000, 7.005000, ",
+    "Total Cycles": 2192,
+    "Total uOps": 4500,
+    "uOps Per Cycle": 2.0529197080291972
+  },
+  "File: 2": {
+    "Block RThroughput": 3.6666666666666665,
+    "Dispatch Width": 6,
+    "IPC": 1.0948905109489051,
+    "Instructions": 1200,
+    "Iterations": 100,
+    "Name": "example-O1.s",
+    "Resource pressure per iteration": " - ,  - , 3.005000, 3.005000, 1.755000, 1.765000, 2.005000, 3.015000, 3.995000, 1.495000, ",
+    "Total Cycles": 1096,
+    "Total uOps": 2200,
+    "uOps Per Cycle": 2.0072992700729926
+  },
+  "File: 3": {
+    "Block RThroughput": 3.6666666666666665,
+    "Dispatch Width": 6,
+    "IPC": 1.0948905109489051,
+    "Instructions": 1200,
+    "Iterations": 100,
+    "Name": "example-O2.s",
+    "Resource pressure per iteration": " - ,  - , 3.005000, 3.005000, 1.755000, 1.765000, 2.005000, 3.015000, 3.995000, 1.495000, ",
+    "Total Cycles": 1096,
+    "Total uOps": 2200,
+    "uOps Per Cycle": 2.0072992700729926
+  },
+  "File: 4": {
+    "Block RThroughput": 3.6666666666666665,
+    "Dispatch Width": 6,
+    "IPC": 1.0948905109489051,
+    "Instructions": 1200,
+    "Iterations": 100,
+    "Name": "example-O3.s",
+    "Resource pressure per iteration": " - ,  - , 3.005000, 3.005000, 1.755000, 1.765000, 2.005000, 3.015000, 3.995000, 1.495000, ",
+    "Total Cycles": 1096,
+    "Total uOps": 2200,
+    "uOps Per Cycle": 2.0072992700729926
+  }
+}
 
-        * The default target (i.e. ``ninja`` or ``make``) will build all of LLVM.
 
-        * The ``check-all`` target (i.e. ``ninja check-all``) will run the
-          regression tests to ensure everything is in working order.
+```
 
-        * CMake will generate targets for each tool and library, and most
-          LLVM sub-projects generate their own ``check-<project>`` target.
 
-        * Running a serial build will be **slow**.  To improve speed, try running a
-          parallel build.  That's done by default in Ninja; for ``make``, use the option
-          ``-j NNN``, where ``NNN`` is the number of parallel jobs, e.g. the number of
-          CPUs you have.
+## LLVM-MCA-PRETTY-PRINTER python script
 
-      * For more information see [CMake](https://llvm.org/docs/CMake.html)
+New uitlity, __llvm-mca-pretty-printer (python script)__, depends on the llvm-mca tool. 
+LLVM-MCA tool will be called within the llvm-mca-pretty-printer tool, which has a task to 
+visualize the differences in the statistics of input assembler files (the “-diff” 
+option has been added) or to display pictorial statistics of one input file (the option 
+“-diff” is not given ). (Without the “-mtriple” and “-mcpu” options specified, the default 
+tool-level options llvm-mca-pretty-printer are “-mcpu=skylake” and “-mtriple=x86_64-unknown-linux-gnu”. 
+Also if we do not give the "-iterations" option, the default value for this option is 100. 
+Python script is limited to working with 20 input files, due to the use of a color map for 
+the purpose of drawing bars.):
+```
+$ llvm-mca-pretty-printer example.s 
+```
+![llvm-mca](https://user-images.githubusercontent.com/84574066/143688094-faadfbab-d9e1-4455-94f5-0e4e87c6a0e7.png)
 
-Consult the
-[Getting Started with LLVM](https://llvm.org/docs/GettingStarted.html#getting-started-with-llvm)
-page for detailed information on configuring and compiling LLVM. You can visit
-[Directory Layout](https://llvm.org/docs/GettingStarted.html#directory-layout)
-to learn about the layout of the source code tree.
+
+```
+$ llvm-mca-pretty-printer example.s example-O1.s example-O2.s example-O3.s -diff
+```
+![llvm-mca-diff](https://user-images.githubusercontent.com/84574066/143687788-b1a5d756-5da9-4ad3-bd05-d2c87e200dc5.png)
+
+
+
+### Applying the script to assembly code obtained from [test_case](https://bugs.llvm.org/attachment.cgi?id=25056)
+```   
+$ llc store.ll -o store.s
+$ llc -O3 -aarch64-enable-gep-opt=true store.ll -o store.s 
+$ llvm-mca-pretty-printer -mtriple=aarch64 -mcpu=cyclone store.s storeEnableGrepOpt.s -diff
+```  
+![llvm-mca-diff](https://user-images.githubusercontent.com/84574066/143687767-92b04a98-c53f-4366-9093-ba8cd3cf73e9.png)
+
+
+
+### Applying the script to assembly code obtained from [llvm/tools/llc/llc.cpp](https://github.com/llvm/llvm-project/blob/main/llvm/tools/llc/llc.cpp) 
+
+Display of tool operation if any of the optimizations -O0, -O1, -O2 or -O3 was used during the compilation, ie display of the difference in statistics.
+
+![llvm-mca-diff](https://user-images.githubusercontent.com/84574066/143687739-39b4dead-db3f-4b46-8996-68b35c0d8f99.png)
+
+
+
