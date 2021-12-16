@@ -1220,4 +1220,5 @@ endif()
 
 if (LLVM_INCLUDE_UTILS AND LLVM_INCLUDE_TOOLS)
   add_subdirectory(utils/llvm-locstats)
+  add_subdirectory(utils/llvm-mca-pretty-printer)
 endif()
