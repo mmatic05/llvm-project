@@ -22,6 +22,7 @@
 
 #include "CodeRegion.h"
 #include "CodeRegionGenerator.h"
+#include "MachineCodePerformance.h"
 #include "PipelinePrinter.h"
 #include "Views/BottleneckAnalysis.h"
 #include "Views/DispatchStatistics.h"
@@ -71,6 +72,10 @@ static cl::OptionCategory ViewOptions("View Options");
 static cl::opt<std::string> InputFilename(cl::Positional,
                                           cl::desc("<input file>"),
                                           cl::cat(ToolOptions), cl::init("-"));
+
+static cl::list<std::string> InputFilenames(cl::Positional, cl::ZeroOrMore,
+                                            cl::desc("<input files>"),
+                                            cl::cat(ToolOptions));
 
 static cl::opt<std::string> OutputFilename("o", cl::desc("Output filename"),
                                            cl::init("-"), cl::cat(ToolOptions),
@@ -225,6 +230,12 @@ static cl::opt<bool> DisableCustomBehaviour(
         "Disable custom behaviour (use the default class which does nothing)."),
     cl::cat(ViewOptions), cl::init(false));
 
+static cl::opt<bool>
+    PrintDifference("diff",
+                    cl::desc("Compare the statistics (results of the llvm-mca "
+                             "tool) to the attached assembler files."),
+                    cl::cat(ToolOptions), cl::init(false));
+
 namespace {
 
 const Target *getTarget(const char *ProgName) {
@@ -301,23 +312,14 @@ static bool runPipeline(mca::Pipeline &P) {
   return true;
 }
 
-int main(int argc, char **argv) {
-  InitLLVM X(argc, argv);
+std::unique_ptr<ToolOutputFile> TOF;
+SmallVector<std::unique_ptr<mca::MachineCodePerformance>>
+    MachineCodePerformances;
+std::unique_ptr<MCSchedModel> MCSM;
 
-  // Initialize targets and assembly parsers.
-  InitializeAllTargetInfos();
-  InitializeAllTargetMCs();
-  InitializeAllAsmParsers();
-  InitializeAllTargetMCAs();
-
-  // Enable printing of available targets when flag --version is specified.
-  cl::AddExtraVersionPrinter(TargetRegistry::printRegisteredTargetsForVersion);
-
-  cl::HideUnrelatedOptions({&ToolOptions, &ViewOptions});
-
-  // Parse flags and initialize target options.
-  cl::ParseCommandLineOptions(argc, argv,
-                              "llvm machine code performance analyzer.\n");
+// Generating llvm-mca statistics for a single input file.
+static int oneCycle(char **argv, std::string InputFilename) {
+  std::unique_ptr<mca::MachineCodePerformance> MCP;
 
   // Get the target from the triple. If a triple is not specified, then select
   // the default triple for the host. If the triple doesn't correspond to any
@@ -433,13 +435,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Now initialize the output file.
-  auto OF = getOutputStream();
-  if (std::error_code EC = OF.getError()) {
-    WithColor::error() << EC.message() << '\n';
-    return 1;
-  }
-
   unsigned AssemblerDialect = CRG.getAssemblerDialect();
   if (OutputAsmVariant >= 0)
     AssemblerDialect = static_cast<unsigned>(OutputAsmVariant);
@@ -456,9 +451,10 @@ int main(int argc, char **argv) {
   // Set the display preference for hex vs. decimal immediates.
   IP->setPrintImmHex(PrintImmHex);
 
-  std::unique_ptr<ToolOutputFile> TOF = std::move(*OF);
-
   const MCSchedModel &SM = STI->getSchedModel();
+
+  if (MCSM == nullptr)
+    MCSM = std::make_unique<MCSchedModel>(STI->getSchedModel());
 
   // Create an instruction builder.
   mca::InstrBuilder IB(*STI, *MCII, *MRI, MCIA.get());
@@ -556,12 +552,13 @@ int main(int argc, char **argv) {
       if (!runPipeline(*P))
         return 1;
 
-      if (PrintJson) {
-        Printer.printReport(JSONOutput);
-      } else {
-        Printer.printReport(TOF->os());
+      if (!PrintDifference) {
+        if (PrintJson) {
+          Printer.printReport(JSONOutput);
+        } else {
+          Printer.printReport(TOF->os());
+        }
       }
-
       ++RegionIdx;
       continue;
     }
@@ -585,6 +582,10 @@ int main(int argc, char **argv) {
     auto P = MCA.createDefaultPipeline(PO, S, *CB);
 
     mca::PipelinePrinter Printer(*P, *Region, RegionIdx, *STI, PO);
+
+    if (PrintDifference)
+      MCP = std::make_unique<mca::MachineCodePerformance>(
+          mca::MachineCodePerformance(*P));
 
     // Targets can define their own custom Views that exist within their
     // /lib/Target/ directory so that the View can utilize their CustomBehaviour
@@ -610,6 +611,10 @@ int main(int argc, char **argv) {
 
     if (PrintSummaryView)
       Printer.addView(
+          std::make_unique<mca::SummaryView>(SM, Insts, DispatchWidth));
+
+    if (PrintDifference)
+      MCP->addSummaryView(
           std::make_unique<mca::SummaryView>(SM, Insts, DispatchWidth));
 
     if (EnableBottleneckAnalysis) {
@@ -652,6 +657,11 @@ int main(int argc, char **argv) {
       Printer.addView(
           std::make_unique<mca::ResourcePressureView>(*STI, *IP, Insts));
 
+    if (PrintDifference) 
+      MCP->addResourcePressureView(
+          std::make_unique<mca::ResourcePressureView>(*STI, *IP, Insts));
+    
+
     if (PrintTimelineView) {
       unsigned TimelineIterations =
           TimelineMaxIterations ? TimelineMaxIterations : 10;
@@ -673,17 +683,305 @@ int main(int argc, char **argv) {
     if (!runPipeline(*P))
       return 1;
 
-    if (PrintJson) {
-      Printer.printReport(JSONOutput);
-    } else {
-      Printer.printReport(TOF->os());
+    if (!PrintDifference) {
+      if (PrintJson) {
+        Printer.printReport(JSONOutput);
+      } else {
+        Printer.printReport(TOF->os());
+      }
     }
-
     ++RegionIdx;
   }
 
-  if (PrintJson)
-    TOF->os() << formatv("{0:2}", json::Value(std::move(JSONOutput))) << "\n";
+  if (!PrintDifference) {
+    if (PrintJson)
+      TOF->os() << formatv("{0:2}", json::Value(std::move(JSONOutput))) << "\n";
+  } else {
+    MCP->collectFileParameters();
+    MachineCodePerformances.push_back(std::move(MCP));
+  }
+
+  return 0;
+}
+
+// Returns the name of the file to be analyzed from the path it is on.
+static std::string getFilenameFromPath(std::string FilePath) {
+  size_t LastSlashPosition = FilePath.rfind("/");
+  return FilePath.substr(LastSlashPosition + 1,
+                         FilePath.length() - LastSlashPosition - 1);
+}
+
+static int printCompareResults() {
+  constexpr unsigned ParameterTypesSize = 20;
+  constexpr unsigned SpacedFormattedOutputSize = 20;
+  constexpr unsigned FormatedValueLength = 28;
+  constexpr float FollowRoundingRules = 0.5;
+  constexpr unsigned TwoDecimalPlaceShift = 100;
+  constexpr unsigned TwoPlacesSavedFromDecimalPoint = 3;
+
+  std::string ParameterTypes[8] = {
+      "Iterations",     "Instructions",   "Total Cycles", "Total uOps",
+      "Dispatch Width", "uOps Per Cycle", "IPC",          "Block RThroughput"};
+
+  if (!PrintJson) {
+    std::string FormatedValue;
+    std::string SpacedFormattedOutput = " ";
+    SpacedFormattedOutput.resize(SpacedFormattedOutputSize, ' ');
+
+    for (int i = 0; i < 8; i++) {
+      ParameterTypes[i] += ":";
+      ParameterTypes[i].resize(ParameterTypesSize, ' ');
+    }
+
+    TOF->os() << "\nInput files:  \n";
+    TOF->os() << "[f1]: " << getFilenameFromPath(InputFilename) << "\n";
+    for (unsigned long i = 0; i < InputFilenames.size(); i++)
+      TOF->os() << "[f" << i + 2
+                << "]: " << getFilenameFromPath(InputFilenames[i]) << "\n";
+
+    TOF->os() << "\nIterations:  "
+              << MachineCodePerformances[0]->getFileParameters().Iterations
+              << "\n";
+
+    TOF->os() << "                                        ";
+    FormatedValue = "[f1]:";
+    FormatedValue.resize(FormatedValueLength, ' ');
+    TOF->os() << FormatedValue << "  ";
+    for (unsigned long i = 1; i <= InputFilenames.size(); i++) {
+      FormatedValue = "[f" + std::to_string(i + 1) + "]:";
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+    TOF->os() << ParameterTypes[1] << SpacedFormattedOutput;
+    for (const auto &mcp : MachineCodePerformances) {
+      FormatedValue = std::to_string(mcp->getFileParameters().Instructions);
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+    TOF->os() << ParameterTypes[2] << SpacedFormattedOutput;
+    for (const auto &mcp : MachineCodePerformances) {
+      FormatedValue = std::to_string(mcp->getFileParameters().TotalCycles);
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+    TOF->os() << ParameterTypes[3] << SpacedFormattedOutput;
+    for (const auto &mcp : MachineCodePerformances) {
+      FormatedValue = std::to_string(mcp->getFileParameters().TotalUOps);
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+    TOF->os() << ParameterTypes[4] << SpacedFormattedOutput;
+    for (const auto &mcp : MachineCodePerformances) {
+      FormatedValue = std::to_string(mcp->getFileParameters().DispatchWidth);
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+    TOF->os() << ParameterTypes[5] << SpacedFormattedOutput;
+    for (const auto &mcp : MachineCodePerformances) {
+      FormatedValue = std::to_string(
+          floor((mcp->getFileParameters().UOpsPerCycle * TwoDecimalPlaceShift) +
+                FollowRoundingRules) /
+          TwoDecimalPlaceShift);
+      FormatedValue.resize(FormatedValue.find('.') +
+                           TwoPlacesSavedFromDecimalPoint);
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+    TOF->os() << ParameterTypes[6] << SpacedFormattedOutput;
+    for (const auto &mcp : MachineCodePerformances) {
+      FormatedValue = std::to_string(
+          floor((mcp->getFileParameters().IPC * TwoDecimalPlaceShift) +
+                FollowRoundingRules) /
+          TwoDecimalPlaceShift);
+      FormatedValue.resize(FormatedValue.find('.') +
+                           TwoPlacesSavedFromDecimalPoint);
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+    TOF->os() << ParameterTypes[7] << SpacedFormattedOutput;
+    for (const auto &mcp : MachineCodePerformances) {
+      FormatedValue =
+          std::to_string(floor((mcp->getFileParameters().BlockRThroughput *
+                                TwoDecimalPlaceShift) +
+                               FollowRoundingRules) /
+                         TwoDecimalPlaceShift);
+      FormatedValue.resize(FormatedValue.find('.') +
+                           TwoPlacesSavedFromDecimalPoint);
+      FormatedValue.resize(FormatedValueLength, ' ');
+      TOF->os() << FormatedValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    MachineCodePerformances[0]->printColNamesOfResourcePressurePerIter(
+        TOF->os(), *MCSM);
+    for (unsigned long i = 0; i < MachineCodePerformances.size(); i++) {
+      TOF->os() << "[f" << i + 1 << "]: \n";
+      MachineCodePerformances[i]->printResourcePressurePerIterWithoutColNames(
+          TOF->os(), *MCSM);
+      TOF->os() << "\n";
+    }
+
+    TOF->os() << "\n\n";
+
+  } else {
+    SmallVector<json::Object> JsonObjVector{};
+    json::Object JsonObjCreatedByVector;
+    json::Object JsonObjVectorElem;
+    std::string ResourcePressurePerIteration = "";
+    std::string OrdinalNumberOfFile;
+
+    JsonObjVectorElem["Name"] = getFilenameFromPath(InputFilename);
+    JsonObjVectorElem[ParameterTypes[0]] =
+        MachineCodePerformances[0]->getFileParameters().Iterations;
+    JsonObjVectorElem[ParameterTypes[1]] =
+        MachineCodePerformances[0]->getFileParameters().Instructions;
+    JsonObjVectorElem[ParameterTypes[2]] =
+        MachineCodePerformances[0]->getFileParameters().TotalCycles;
+    JsonObjVectorElem[ParameterTypes[3]] =
+        MachineCodePerformances[0]->getFileParameters().TotalUOps;
+    JsonObjVectorElem[ParameterTypes[4]] =
+        MachineCodePerformances[0]->getFileParameters().DispatchWidth;
+    JsonObjVectorElem[ParameterTypes[5]] =
+        MachineCodePerformances[0]->getFileParameters().UOpsPerCycle;
+    JsonObjVectorElem[ParameterTypes[6]] =
+        MachineCodePerformances[0]->getFileParameters().IPC;
+    JsonObjVectorElem[ParameterTypes[7]] =
+        MachineCodePerformances[0]->getFileParameters().BlockRThroughput;
+
+    ResourcePressurePerIteration = "";
+    for (unsigned long j = 0; j < MachineCodePerformances[0]
+                                      ->getFileParameters()
+                                      .ResourcePressurePerIter.size();
+         j++) {
+      ResourcePressurePerIteration += MachineCodePerformances[0]
+                                          ->getFileParameters()
+                                          .ResourcePressurePerIter[j];
+      if (j != MachineCodePerformances[0]
+                       ->getFileParameters()
+                       .ResourcePressurePerIter.size() -
+                   1)
+        ResourcePressurePerIteration += ", ";
+    }
+    JsonObjVectorElem["Resource pressure per iteration"] =
+        ResourcePressurePerIteration;
+    JsonObjVector.push_back(std::move(JsonObjVectorElem));
+
+    for (unsigned long i = 0; i < InputFilenames.size(); i++) {
+      JsonObjVectorElem["Name"] = getFilenameFromPath(InputFilenames[i]);
+      JsonObjVectorElem[ParameterTypes[0]] =
+          MachineCodePerformances[i + 1]->getFileParameters().Iterations;
+      JsonObjVectorElem[ParameterTypes[1]] =
+          MachineCodePerformances[i + 1]->getFileParameters().Instructions;
+      JsonObjVectorElem[ParameterTypes[2]] =
+          MachineCodePerformances[i + 1]->getFileParameters().TotalCycles;
+      JsonObjVectorElem[ParameterTypes[3]] =
+          MachineCodePerformances[i + 1]->getFileParameters().TotalUOps;
+      JsonObjVectorElem[ParameterTypes[4]] =
+          MachineCodePerformances[i + 1]->getFileParameters().DispatchWidth;
+      JsonObjVectorElem[ParameterTypes[5]] =
+          MachineCodePerformances[i + 1]->getFileParameters().UOpsPerCycle;
+      JsonObjVectorElem[ParameterTypes[6]] =
+          MachineCodePerformances[i + 1]->getFileParameters().IPC;
+      JsonObjVectorElem[ParameterTypes[7]] =
+          MachineCodePerformances[i + 1]->getFileParameters().BlockRThroughput;
+
+      ResourcePressurePerIteration = "";
+      for (unsigned long j = 0; j < MachineCodePerformances[i + 1]
+                                        ->getFileParameters()
+                                        .ResourcePressurePerIter.size();
+           j++) {
+        ResourcePressurePerIteration += MachineCodePerformances[i + 1]
+                                            ->getFileParameters()
+                                            .ResourcePressurePerIter[j];
+        if (j != MachineCodePerformances[i + 1]
+                         ->getFileParameters()
+                         .ResourcePressurePerIter.size() -
+                     1)
+          ResourcePressurePerIteration += ", ";
+      }
+
+      JsonObjVectorElem["Resource pressure per iteration"] =
+          ResourcePressurePerIteration;
+      JsonObjVector.push_back(std::move(JsonObjVectorElem));
+    }
+
+    OrdinalNumberOfFile = "File: " + std::to_string(1);
+    JsonObjCreatedByVector[OrdinalNumberOfFile] = std::move(JsonObjVector[0]);
+    for (unsigned long i = 0; i < InputFilenames.size(); i++) {
+      OrdinalNumberOfFile = "File: " + std::to_string(i + 2);
+      JsonObjCreatedByVector[OrdinalNumberOfFile] =
+          std::move(JsonObjVector[i + 1]);
+    }
+
+    TOF->os() << formatv("{0:2}",
+                         json::Value(std::move(JsonObjCreatedByVector)))
+              << "\n";
+  }
+
+  TOF->keep();
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  InitLLVM X(argc, argv);
+
+  // Initialize targets and assembly parsers.
+  InitializeAllTargetInfos();
+  InitializeAllTargetMCs();
+  InitializeAllAsmParsers();
+  InitializeAllTargetMCAs();
+
+  // Enable printing of available targets when flag --version is specified.
+  cl::AddExtraVersionPrinter(TargetRegistry::printRegisteredTargetsForVersion);
+
+  cl::HideUnrelatedOptions({&ToolOptions, &ViewOptions});
+
+  // Parse flags and initialize target options.
+  cl::ParseCommandLineOptions(argc, argv,
+                              "llvm machine code performance analyzer.\n");
+
+  // Now initialize the output file.
+  auto OF = getOutputStream();
+  if (std::error_code EC = OF.getError()) {
+    WithColor::error() << EC.message() << '\n';
+    return 1;
+  }
+  TOF = std::move(*OF);
+
+  MachineCodePerformances =
+      SmallVector<std::unique_ptr<mca::MachineCodePerformance>>();
+
+  if ((InputFilenames.size() + 1 < 2 && PrintDifference) ||
+      (InputFilenames.size() + 1 > 1 && !PrintDifference)) {
+    errs() << " Wrong number of positional arguments specified!\n"
+           << " See: " << argv[0] << " --help\n";
+    return 1;
+  }
+
+  if (PrintDifference) {
+
+    if (oneCycle(argv, InputFilename) != 0)
+      return 1;
+
+    for (unsigned long i = 0; i < InputFilenames.size(); i++) {
+      if (oneCycle(argv, InputFilenames[i]) != 0)
+        return 1;
+    }
+
+    if (printCompareResults() != 0)
+      return 1;
+
+  } else {
+    if (oneCycle(argv, InputFilename) != 0)
+      return 1;
+  }
 
   TOF->keep();
   return 0;

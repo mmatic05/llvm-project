@@ -109,5 +109,11 @@ json::Value SummaryView::toJSON() const {
                    {"BlockRThroughput", DV.BlockRThroughput}});
   return JO;
 }
+
+DisplayValues SummaryView::getSummaryViewParameters() const {
+  DisplayValues DV;
+  collectData(DV);
+  return DV;
+}
 } // namespace mca.
 } // namespace llvm

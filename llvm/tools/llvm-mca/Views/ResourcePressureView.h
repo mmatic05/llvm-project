@@ -96,6 +96,13 @@ public:
   }
   StringRef getNameAsString() const override { return "ResourcePressureView"; }
   json::Value toJSON() const override;
+  void getResourcePressurePerIter(
+      SmallVectorImpl<std::string> &ResourcePressurePerIter) const;
+  void printColNamesOfResourcePressurePerIter(raw_ostream &OS,
+                                              const MCSchedModel &SM) const;
+  void
+  printResourcePressurePerIterWithoutColNames(raw_ostream &OS,
+                                              const MCSchedModel &SM) const;
 };
 } // namespace mca
 } // namespace llvm

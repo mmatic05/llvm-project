@@ -36,6 +36,18 @@
 namespace llvm {
 namespace mca {
 
+struct DisplayValues {
+  unsigned Instructions;
+  unsigned Iterations;
+  unsigned TotalInstructions;
+  unsigned TotalCycles;
+  unsigned DispatchWidth;
+  unsigned TotalUOps;
+  double IPC;
+  double UOpsPerCycle;
+  double BlockRThroughput;
+};
+
 /// A view that collects and prints a few performance numbers.
 class SummaryView : public View {
   const llvm::MCSchedModel &SM;
@@ -45,18 +57,6 @@ class SummaryView : public View {
   unsigned TotalCycles;
   // The total number of micro opcodes contributed by a block of instructions.
   unsigned NumMicroOps;
-
-  struct DisplayValues {
-    unsigned Instructions;
-    unsigned Iterations;
-    unsigned TotalInstructions;
-    unsigned TotalCycles;
-    unsigned DispatchWidth;
-    unsigned TotalUOps;
-    double IPC;
-    double UOpsPerCycle;
-    double BlockRThroughput;
-  };
 
   // For each processor resource, this vector stores the cumulative number of
   // resource cycles consumed by the analyzed code block.
@@ -83,6 +83,7 @@ public:
   void printView(llvm::raw_ostream &OS) const override;
   StringRef getNameAsString() const override { return "SummaryView"; }
   json::Value toJSON() const override;
+  DisplayValues getSummaryViewParameters() const;
 };
 } // namespace mca
 } // namespace llvm
