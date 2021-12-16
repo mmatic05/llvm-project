@@ -196,5 +196,59 @@ json::Value ResourcePressureView::toJSON() const {
   json::Object JO({{"ResourcePressureInfo", std::move(ResourcePressureInfo)}});
   return JO;
 }
+
+void ResourcePressureView::getResourcePressurePerIter(
+    llvm::SmallVector<std::string> &resoucePerIterations) const {
+
+  resoucePerIterations = llvm::SmallVector<std::string>();
+
+  ArrayRef<llvm::MCInst> Source = mca::InstructionView::getSource();
+  const unsigned Executions = LastInstructionIdx / Source.size() + 1;
+
+  for (unsigned I = 0, E = NumResourceUnits; I < E; ++I) {
+    double Usage = ResourceUsage[I + Source.size() * E];
+
+    if (!(Usage / Executions) || (Usage / Executions) < 0.005) {
+      resoucePerIterations.push_back(" - ");
+    } else {
+      resoucePerIterations.push_back(
+          std::to_string((((Usage / Executions) * 100) + 0.5) / 100));
+    }
+  }
+}
+
+void ResourcePressureView::printColNamesPerIter(llvm::raw_ostream &OS,
+                                                const MCSchedModel &SM) const {
+
+  std::string Buffer;
+  raw_string_ostream TempStream(Buffer);
+  formatted_raw_ostream FOS(TempStream);
+
+  FOS << "\n\nResource pressure per iteration:\n";
+  FOS.flush();
+  printColumnNames(FOS, SM);
+  FOS << '\n';
+  FOS.flush();
+  OS << Buffer;
+}
+
+void ResourcePressureView::printValuesPerIter(llvm::raw_ostream &OS,
+                                              const MCSchedModel &SM) const {
+
+  std::string Buffer;
+  raw_string_ostream TempStream(Buffer);
+  formatted_raw_ostream FOS(TempStream);
+
+  ArrayRef<llvm::MCInst> Source = getSource();
+  const unsigned Executions = LastInstructionIdx / Source.size() + 1;
+  for (unsigned I = 0, E = NumResourceUnits; I < E; ++I) {
+    double Usage = ResourceUsage[I + Source.size() * E];
+    printResourcePressure(FOS, Usage / Executions, (I + 1) * 7);
+  }
+
+  FOS.flush();
+  OS << Buffer;
+}
+
 } // namespace mca
 } // namespace llvm

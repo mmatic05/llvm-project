@@ -83,6 +83,10 @@ public:
   void printView(llvm::raw_ostream &OS) const override;
   StringRef getNameAsString() const override { return "SummaryView"; }
   json::Value toJSON() const override;
+  void getDisplayValues(unsigned &Instructions, unsigned &Iterations,
+                        unsigned &TotalCycles, unsigned &DispatchWidth,
+                        unsigned &TotalUOps, double &IPC, double &UOpsPerCycle,
+                        double &BlockRThroughput) const;
 };
 } // namespace mca
 } // namespace llvm

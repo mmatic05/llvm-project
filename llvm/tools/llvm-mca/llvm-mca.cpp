@@ -22,6 +22,7 @@
 
 #include "CodeRegion.h"
 #include "CodeRegionGenerator.h"
+#include "MachineCodeStatistics.h"
 #include "PipelinePrinter.h"
 #include "Views/BottleneckAnalysis.h"
 #include "Views/DispatchStatistics.h"
@@ -68,9 +69,9 @@ static mc::RegisterMCTargetOptionsFlags MOF;
 static cl::OptionCategory ToolOptions("Tool Options");
 static cl::OptionCategory ViewOptions("View Options");
 
-static cl::opt<std::string> InputFilename(cl::Positional,
-                                          cl::desc("<input file>"),
-                                          cl::cat(ToolOptions), cl::init("-"));
+static cl::list<std::string> InputFilenames(cl::Positional, cl::OneOrMore,
+                                            cl::desc("<input files>"),
+                                            cl::cat(ToolOptions));
 
 static cl::opt<std::string> OutputFilename("o", cl::desc("Output filename"),
                                            cl::init("-"), cl::cat(ToolOptions),
@@ -225,6 +226,12 @@ static cl::opt<bool> DisableCustomBehaviour(
         "Disable custom behaviour (use the default class which does nothing)."),
     cl::cat(ViewOptions), cl::init(false));
 
+static cl::opt<bool>
+    PrintDifference("diff",
+                    cl::desc("Compare the statistics (results of the llvm-mca "
+                             "tool) to the attached assembler files."),
+                    cl::cat(ToolOptions), cl::init(false));
+
 namespace {
 
 const Target *getTarget(const char *ProgName) {
@@ -301,23 +308,15 @@ static bool runPipeline(mca::Pipeline &P) {
   return true;
 }
 
-int main(int argc, char **argv) {
-  InitLLVM X(argc, argv);
+std::unique_ptr<ToolOutputFile> TOF;
+llvm::SmallVector<std::unique_ptr<mca::MachineCodeStatistics>>
+    machineCodeStatistics;
+std::unique_ptr<MCSchedModel> MCSM;
 
-  // Initialize targets and assembly parsers.
-  InitializeAllTargetInfos();
-  InitializeAllTargetMCs();
-  InitializeAllAsmParsers();
-  InitializeAllTargetMCAs();
+// Generating llvm-mca statistics for a single input file.
+static int oneCycle(char **argv, std::string InputFilename) {
 
-  // Enable printing of available targets when flag --version is specified.
-  cl::AddExtraVersionPrinter(TargetRegistry::printRegisteredTargetsForVersion);
-
-  cl::HideUnrelatedOptions({&ToolOptions, &ViewOptions});
-
-  // Parse flags and initialize target options.
-  cl::ParseCommandLineOptions(argc, argv,
-                              "llvm machine code performance analyzer.\n");
+  std::unique_ptr<mca::MachineCodeStatistics> MCS;
 
   // Get the target from the triple. If a triple is not specified, then select
   // the default triple for the host. If the triple doesn't correspond to any
@@ -433,13 +432,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Now initialize the output file.
-  auto OF = getOutputStream();
-  if (std::error_code EC = OF.getError()) {
-    WithColor::error() << EC.message() << '\n';
-    return 1;
-  }
-
   unsigned AssemblerDialect = CRG.getAssemblerDialect();
   if (OutputAsmVariant >= 0)
     AssemblerDialect = static_cast<unsigned>(OutputAsmVariant);
@@ -456,9 +448,11 @@ int main(int argc, char **argv) {
   // Set the display preference for hex vs. decimal immediates.
   IP->setPrintImmHex(PrintImmHex);
 
-  std::unique_ptr<ToolOutputFile> TOF = std::move(*OF);
-
   const MCSchedModel &SM = STI->getSchedModel();
+
+  if (MCSM == nullptr) {
+    MCSM = std::make_unique<MCSchedModel>(STI->getSchedModel());
+  }
 
   // Create an instruction builder.
   mca::InstrBuilder IB(*STI, *MCII, *MRI, MCIA.get());
@@ -556,12 +550,13 @@ int main(int argc, char **argv) {
       if (!runPipeline(*P))
         return 1;
 
-      if (PrintJson) {
-        Printer.printReport(JSONOutput);
-      } else {
-        Printer.printReport(TOF->os());
+      if (!PrintDifference) {
+        if (PrintJson) {
+          Printer.printReport(JSONOutput);
+        } else {
+          Printer.printReport(TOF->os());
+        }
       }
-
       ++RegionIdx;
       continue;
     }
@@ -585,6 +580,11 @@ int main(int argc, char **argv) {
     auto P = MCA.createDefaultPipeline(PO, S, *CB);
 
     mca::PipelinePrinter Printer(*P, *Region, RegionIdx, *STI, PO);
+
+    if (PrintDifference) {
+      MCS = std::make_unique<mca::MachineCodeStatistics>(
+          mca::MachineCodeStatistics(*P));
+    }
 
     // Targets can define their own custom Views that exist within their
     // /lib/Target/ directory so that the View can utilize their CustomBehaviour
@@ -610,6 +610,10 @@ int main(int argc, char **argv) {
 
     if (PrintSummaryView)
       Printer.addView(
+          std::make_unique<mca::SummaryView>(SM, Insts, DispatchWidth));
+
+    if (PrintDifference)
+      MCS->addSummaryView(
           std::make_unique<mca::SummaryView>(SM, Insts, DispatchWidth));
 
     if (EnableBottleneckAnalysis) {
@@ -652,6 +656,11 @@ int main(int argc, char **argv) {
       Printer.addView(
           std::make_unique<mca::ResourcePressureView>(*STI, *IP, Insts));
 
+    if (PrintDifference) {
+      MCS->addResourcePressureView(
+          std::make_unique<mca::ResourcePressureView>(*STI, *IP, Insts));
+    }
+
     if (PrintTimelineView) {
       unsigned TimelineIterations =
           TimelineMaxIterations ? TimelineMaxIterations : 10;
@@ -673,18 +682,255 @@ int main(int argc, char **argv) {
     if (!runPipeline(*P))
       return 1;
 
-    if (PrintJson) {
-      Printer.printReport(JSONOutput);
-    } else {
-      Printer.printReport(TOF->os());
+    if (!PrintDifference) {
+      if (PrintJson) {
+        Printer.printReport(JSONOutput);
+      } else {
+        Printer.printReport(TOF->os());
+      }
     }
-
     ++RegionIdx;
   }
 
-  if (PrintJson)
-    TOF->os() << formatv("{0:2}", json::Value(std::move(JSONOutput))) << "\n";
+  if (!PrintDifference) {
+    if (PrintJson)
+      TOF->os() << formatv("{0:2}", json::Value(std::move(JSONOutput))) << "\n";
+  } else {
+    MCS->collectParametersToCompare();
+    machineCodeStatistics.push_back(std::move(MCS));
+  }
+
+  return 0;
+}
+
+// Returns the name of the file to be analyzed from the path it is on.
+static std::string getFilenameFromPath(std::string path) {
+  size_t pos = path.rfind("/");
+  return path.substr(pos + 1, path.length() - pos - 1);
+}
+
+static int printCompareResults() {
+
+  std::string typeOfStatistics[9] = {
+      "Iterations", "Instructions",      "Total Cycles",
+      "Total uOps", "Dispatch Width",    "uOps Per Cycle",
+      "IPC",        "Block RThroughput", "Resource pressure per iteration"};
+
+  if (!PrintJson) {
+
+    std::string formatValue;
+    std::string spaceFormat = " ";
+    spaceFormat.resize(20, ' ');
+
+    for (int i = 0; i < 8; i++)
+      typeOfStatistics[i].resize(15, ' ');
+
+    TOF->os() << "\nInput files:  \n";
+    for (unsigned long i = 0; i < InputFilenames.size(); i++)
+      TOF->os() << "[f" << i + 1
+                << "]: " << getFilenameFromPath(InputFilenames[i]) << "\n";
+
+    TOF->os() << "\nIterations:  "
+              << machineCodeStatistics[0]->getOneFileParameters().Iterations
+              << "\n";
+
+    TOF->os() << "           ";
+    for (unsigned long i = 0; i < InputFilenames.size(); i++) {
+      if (i == 0)
+        TOF->os() << "                        ";
+      formatValue = "[f" + std::to_string(i + 1) + "]";
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    TOF->os() << typeOfStatistics[1] << spaceFormat;
+    for (const auto &mcs : machineCodeStatistics) {
+      formatValue = std::to_string(mcs->getOneFileParameters().Instructions);
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    TOF->os() << typeOfStatistics[2] << spaceFormat;
+    for (const auto &mcs : machineCodeStatistics) {
+      formatValue = std::to_string(mcs->getOneFileParameters().TotalCycles);
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    TOF->os() << typeOfStatistics[3] << spaceFormat;
+    for (const auto &mcs : machineCodeStatistics) {
+      formatValue = std::to_string(mcs->getOneFileParameters().TotalUOps);
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    TOF->os() << typeOfStatistics[4] << spaceFormat;
+    for (const auto &mcs : machineCodeStatistics) {
+      formatValue = std::to_string(mcs->getOneFileParameters().DispatchWidth);
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    TOF->os() << typeOfStatistics[5] << spaceFormat;
+    for (const auto &mcs : machineCodeStatistics) {
+      formatValue = std::to_string(
+          floor((mcs->getOneFileParameters().UOpsPerCycle * 100) + 0.5) / 100);
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    TOF->os() << typeOfStatistics[6] << spaceFormat;
+    for (const auto &mcs : machineCodeStatistics) {
+      formatValue = std::to_string(
+          floor((mcs->getOneFileParameters().IPC * 100) + 0.5) / 100);
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    TOF->os() << typeOfStatistics[7] << spaceFormat;
+    for (const auto &mcs : machineCodeStatistics) {
+      formatValue = std::to_string(
+          floor((mcs->getOneFileParameters().BlockRThroughput * 100) + 0.5) /
+          100);
+      formatValue.resize(28, ' ');
+      TOF->os() << formatValue << "  ";
+    }
+    TOF->os() << "\n";
+
+    machineCodeStatistics[0]->printColNamesPerIter(TOF->os(), *MCSM);
+    for (unsigned long i = 0; i < machineCodeStatistics.size(); i++) {
+      TOF->os() << "[f" << i + 1 << "]: \n";
+      machineCodeStatistics[i]->printValuesPerIter(TOF->os(), *MCSM);
+      TOF->os() << "\n";
+    }
+    TOF->os() << "\n\n";
+
+  } else {
+
+    llvm::SmallVector<json::Object> jsonObjects{};
+    json::Object jsonObject;
+
+    for (unsigned long i = 0; i < InputFilenames.size(); i++) {
+
+      json::Object jsonObj;
+
+      jsonObj["Name"] = getFilenameFromPath(InputFilenames[i]);
+      jsonObj[typeOfStatistics[0]] =
+          machineCodeStatistics[i]->getOneFileParameters().Iterations;
+      jsonObj[typeOfStatistics[1]] =
+          machineCodeStatistics[i]->getOneFileParameters().Instructions;
+      jsonObj[typeOfStatistics[2]] =
+          machineCodeStatistics[i]->getOneFileParameters().TotalCycles;
+      jsonObj[typeOfStatistics[3]] =
+          machineCodeStatistics[i]->getOneFileParameters().TotalUOps;
+      jsonObj[typeOfStatistics[4]] =
+          machineCodeStatistics[i]->getOneFileParameters().DispatchWidth;
+      jsonObj[typeOfStatistics[5]] =
+          machineCodeStatistics[i]->getOneFileParameters().UOpsPerCycle;
+      jsonObj[typeOfStatistics[6]] =
+          machineCodeStatistics[i]->getOneFileParameters().IPC;
+      jsonObj[typeOfStatistics[7]] =
+          machineCodeStatistics[i]->getOneFileParameters().BlockRThroughput;
+
+      std::string resPerIter = "";
+
+      for (unsigned long j = 0; j < machineCodeStatistics[i]
+                                        ->getOneFileParameters()
+                                        .resoucePerIterations.size();
+           j++) {
+        resPerIter += machineCodeStatistics[i]
+                          ->getOneFileParameters()
+                          .resoucePerIterations[j];
+        if (i != machineCodeStatistics[i]
+                         ->getOneFileParameters()
+                         .resoucePerIterations.size() -
+                     1)
+          resPerIter += ", ";
+      }
+
+      jsonObj[typeOfStatistics[8]] = resPerIter;
+
+      jsonObjects.push_back(std::move(jsonObj));
+    }
+
+    for (unsigned long i = 0; i < InputFilenames.size(); i++) {
+      std::string ordinalNumberOfFile = "File: " + std::to_string(i + 1);
+      jsonObject[ordinalNumberOfFile] = std::move(jsonObjects[i]);
+    }
+
+    TOF->os() << formatv("{0:2}", json::Value(std::move(jsonObject))) << "\n";
+  }
 
   TOF->keep();
+
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  InitLLVM X(argc, argv);
+
+  // Initialize targets and assembly parsers.
+  InitializeAllTargetInfos();
+  InitializeAllTargetMCs();
+  InitializeAllAsmParsers();
+  InitializeAllTargetMCAs();
+
+  // Enable printing of available targets when flag --version is specified.
+  cl::AddExtraVersionPrinter(TargetRegistry::printRegisteredTargetsForVersion);
+
+  cl::HideUnrelatedOptions({&ToolOptions, &ViewOptions});
+
+  // Parse flags and initialize target options.
+  cl::ParseCommandLineOptions(argc, argv,
+                              "llvm machine code performance analyzer.\n");
+
+  // Now initialize the output file.
+  auto OF = getOutputStream();
+  if (std::error_code EC = OF.getError()) {
+    WithColor::error() << EC.message() << '\n';
+    return 1;
+  }
+
+  TOF = std::move(*OF);
+
+  machineCodeStatistics =
+      llvm::SmallVector<std::unique_ptr<mca::MachineCodeStatistics>>();
+
+  if ((InputFilenames.size() < 2 && PrintDifference) ||
+      (InputFilenames.size() > 1 && !PrintDifference)) {
+    errs() << " Wrong number of positional arguments specified!\n"
+           << " See: " << argv[0] << " --help\n";
+    return 1;
+  }
+
+  if (PrintDifference) {
+
+    unsigned calledFunctionHasErrors;
+
+    for (unsigned long i = 0; i < InputFilenames.size(); i++) {
+      calledFunctionHasErrors = oneCycle(argv, InputFilenames[i]);
+      if (calledFunctionHasErrors != 0)
+        return 1;
+    }
+
+    calledFunctionHasErrors = printCompareResults();
+    if (calledFunctionHasErrors != 0)
+      return 1;
+
+  } else {
+    int calledFunctionHasErrors = oneCycle(argv, InputFilenames[0]);
+    if (calledFunctionHasErrors != 0)
+      return 1;
+  }
+
+  TOF->keep();
+
   return 0;
 }

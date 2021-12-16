@@ -17,6 +17,7 @@ add_llvm_tool(llvm-mca
   CodeRegion.cpp
   CodeRegionGenerator.cpp
   PipelinePrinter.cpp
+  MachineCodeStatistics.cpp
   Views/BottleneckAnalysis.cpp
   Views/DispatchStatistics.cpp
   Views/InstructionInfoView.cpp

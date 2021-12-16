@@ -109,5 +109,26 @@ json::Value SummaryView::toJSON() const {
                    {"BlockRThroughput", DV.BlockRThroughput}});
   return JO;
 }
+
+void SummaryView::getDisplayValues(unsigned &Instructions, unsigned &Iterations,
+                                   unsigned &TotalCycles,
+                                   unsigned &DispatchWidth, unsigned &TotalUOps,
+                                   double &IPC, double &UOpsPerCycle,
+                                   double &BlockRThroughput) const {
+
+  DisplayValues DV;
+
+  collectData(DV);
+
+  Instructions = DV.TotalInstructions;
+  Iterations = DV.Iterations;
+  TotalCycles = DV.TotalCycles;
+  TotalUOps = DV.TotalUOps;
+  DispatchWidth = DV.DispatchWidth;
+  UOpsPerCycle = DV.UOpsPerCycle;
+  IPC = DV.IPC;
+  BlockRThroughput = DV.BlockRThroughput;
+}
+
 } // namespace mca.
 } // namespace llvm
