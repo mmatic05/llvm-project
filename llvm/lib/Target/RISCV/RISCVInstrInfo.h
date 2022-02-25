@@ -177,6 +177,12 @@ public:
   Optional<std::pair<unsigned, unsigned>>
   isRVVSpillForZvlsseg(unsigned Opcode) const;
 
+  Optional<RegImmPair> isAddImmediate(const MachineInstr &MI,
+                                      Register Reg) const override;
+
+  Optional<ParamLoadedValue> describeLoadedValue(const MachineInstr &MI,
+                                                 Register Reg) const override;
+
 protected:
   const RISCVSubtarget &STI;
 };

@@ -25,6 +25,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/MC/MCInstBuilder.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -1898,4 +1899,177 @@ RISCVInstrInfo::isRVVSpillForZvlsseg(unsigned Opcode) const {
   case RISCV::PseudoVRELOAD8_M1:
     return std::make_pair(8u, 1u);
   }
+}
+
+Optional<ParamLoadedValue>
+RISCVInstrInfo::describeLoadedValue(const MachineInstr &MI,
+                                    Register Reg) const {
+  DIExpression *Expr =
+      DIExpression::get(MI.getMF()->getFunction().getContext(), {});
+
+  // TODO: Special RISCV instructions that need to be described separately.
+  if (auto RegImm = isAddImmediate(MI, Reg)) {
+    Register SrcReg = RegImm->Reg;
+    int64_t Offset = RegImm->Imm;
+
+    // When SrcReg is $x0, treat loaded value as immediate only, $x0 is a zero
+    // register. Ex. $x10 = ADDI $x0, 10
+    if (SrcReg == RISCV::X0)
+      return ParamLoadedValue(MachineOperand::CreateImm(Offset), Expr);
+
+    Expr = DIExpression::prepend(Expr, DIExpression::ApplyOffset, Offset);
+    return ParamLoadedValue(MachineOperand::CreateReg(SrcReg, false), Expr);
+  } else if (auto DestSrc = isCopyInstr(MI)) {
+    const MachineFunction *MF = MI.getMF();
+    const TargetRegisterInfo *TRI = MF->getSubtarget().getRegisterInfo();
+    Register DestReg = DestSrc->Destination->getReg();
+    // TODO: Handle cases where the Reg is sub- or super-register of the
+    // DestReg.
+    if (TRI->isSuperRegister(Reg, DestReg) || TRI->isSubRegister(Reg, DestReg))
+      return None;
+  }
+
+  return TargetInstrInfo::describeLoadedValue(MI, Reg);
+}
+
+Optional<RegImmPair> RISCVInstrInfo::isAddImmediate(const MachineInstr &MI,
+                                                    Register Reg) const {
+  const MachineOperand &Op0 = MI.getOperand(0);
+  if (!Op0.isReg() || Reg != Op0.getReg())
+    return None;
+
+  switch (MI.getOpcode()) {
+  case RISCV::ADDI: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isImm())
+      return RegImmPair{Sop1.getReg(), Sop2.getImm()};
+    break;
+  }
+  case RISCV::LUI: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    if (Dop.isReg() && Sop1.isImm())
+      return RegImmPair{RISCV::X0, Sop1.getImm() << 12};
+    break;
+  }
+  case RISCV::ANDI: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isImm())
+      if (Sop1.getReg() == RISCV::X0 || Sop2.getImm() == (uint64_t)0)
+        return RegImmPair{RISCV::X0, (uint64_t)0};
+    break;
+  }
+  case RISCV::ORI:
+  case RISCV::XORI: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isImm()) {
+      if (Sop1.getReg() == RISCV::X0)
+        return RegImmPair{RISCV::X0, Sop2.getImm()};
+      if (Sop2.getImm() == (uint64_t)0)
+        return RegImmPair{Sop1.getReg(), Sop2.getImm()};
+    }
+    break;
+  }
+  case RISCV::SLLI:
+  case RISCV::SRLI:
+  case RISCV::SRAI: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isImm()) {
+      if (Sop1.getReg() == RISCV::X0)
+        return RegImmPair{RISCV::X0, (uint64_t)0};
+      if (Sop2.getImm() == (uint64_t)0)
+        return RegImmPair{Sop1.getReg(), Sop2.getImm()};
+    }
+    break;
+  }
+  case RISCV::AND: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isReg()) {
+      if (Sop1.getReg() == Sop2.getReg())
+        return RegImmPair{Sop1.getReg(), (uint64_t)0};
+      if (Sop1.getReg() == RISCV::X0 || Sop2.getReg() == RISCV::X0)
+        return RegImmPair{RISCV::X0, (uint64_t)0};
+    }
+    break;
+  }
+  case RISCV::OR: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isReg()) {
+      if (Sop1.getReg() == Sop2.getReg())
+        return RegImmPair{Sop1.getReg(), (uint64_t)0};
+      if (Sop1.getReg() == RISCV::X0)
+        return RegImmPair{Sop2.getReg(), (uint64_t)0};
+      if (Sop2.getReg() == RISCV::X0)
+        return RegImmPair{Sop1.getReg(), (uint64_t)0};
+    }
+    break;
+  }
+  case RISCV::XOR: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isReg()) {
+      if (Sop1.getReg() == Sop2.getReg())
+        return RegImmPair{RISCV::X0, (uint64_t)0};
+      if (Sop1.getReg() == RISCV::X0)
+        return RegImmPair{Sop2.getReg(), (uint64_t)0};
+      if (Sop2.getReg() == RISCV::X0)
+        return RegImmPair{Sop1.getReg(), (uint64_t)0};
+    }
+    break;
+  }
+  case RISCV::ADD: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isReg()) {
+      if (Sop1.getReg() == RISCV::X0 && Sop2.getReg() == RISCV::X0)
+        return RegImmPair{RISCV::X0, (uint64_t)0};
+      if (Sop1.getReg() == RISCV::X0)
+        return RegImmPair{Sop2.getReg(), (uint64_t)0};
+      if (Sop2.getReg() == RISCV::X0)
+        return RegImmPair{Sop1.getReg(), (uint64_t)0};
+    }
+    break;
+  }
+  case RISCV::SUB: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isReg()) {
+      if (Sop1.getReg() == Sop2.getReg())
+        return RegImmPair{RISCV::X0, (uint64_t)0};
+      if (Sop2.getReg() == RISCV::X0)
+        return RegImmPair{Sop1.getReg(), (uint64_t)0};
+    }
+    break;
+  }
+  case RISCV::SLL:
+  case RISCV::SRL:
+  case RISCV::SRA: {
+    const MachineOperand &Dop = MI.getOperand(0);
+    const MachineOperand &Sop1 = MI.getOperand(1);
+    const MachineOperand &Sop2 = MI.getOperand(2);
+    if (Dop.isReg() && Sop1.isReg() && Sop2.isReg()) {
+      if (Sop1.getReg() == RISCV::X0)
+        return RegImmPair{RISCV::X0, (uint64_t)0};
+      if (Sop2.getReg() == RISCV::X0)
+        return RegImmPair{Sop1.getReg(), (uint64_t)0};
+    }
+    break;
+  }
+  }
+  return None;
 }

@@ -71,6 +71,9 @@ RISCVTargetMachine::RISCVTargetMachine(const Target &T, const Triple &TT,
 
   // RISC-V supports the MachineOutliner.
   setMachineOutliner(true);
+
+  // RISC-V supports the debug entry values.
+  setSupportsDebugEntryValues(true);
 }
 
 const RISCVSubtarget *

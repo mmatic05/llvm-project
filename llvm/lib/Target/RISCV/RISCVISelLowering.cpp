@@ -8985,6 +8985,9 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   MachineFunction &MF = DAG.getMachineFunction();
 
+  // Call site info for function parameters tracking.
+  MachineFunction::CallSiteInfo CSInfo;
+
   // Analyze the operands of the call, assigning locations to each operand.
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState ArgCCInfo(CallConv, IsVarArg, MF, ArgLocs, *DAG.getContext());
@@ -9034,6 +9037,8 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   if (!IsTailCall)
     Chain = DAG.getCALLSEQ_START(Chain, NumBytes, 0, CLI.DL);
+
+  const TargetOptions &Options = DAG.getTarget().Options;
 
   // Copy argument values to their designated locations.
   SmallVector<std::pair<Register, SDValue>, 8> RegsToPass;
@@ -9134,6 +9139,10 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
     if (VA.isRegLoc()) {
       // Queue up the argument copies and emit them at the end.
       RegsToPass.push_back(std::make_pair(VA.getLocReg(), ArgValue));
+
+      if (Options.SupportsDebugEntryValues)
+        CSInfo.emplace_back(VA.getLocReg(), i);
+      continue;
     } else {
       assert(VA.isMemLoc() && "Argument not register or memory");
       assert(!IsTailCall && "Tail call not allowed if stack is used "
@@ -9222,12 +9231,16 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
 
   if (IsTailCall) {
     MF.getFrameInfo().setHasTailCall();
-    return DAG.getNode(RISCVISD::TAIL, DL, NodeTys, Ops);
+    SDValue Ret = DAG.getNode(RISCVISD::TAIL, DL, NodeTys, Ops);
+    DAG.addCallSiteInfo(Ret.getNode(), std::move(CSInfo));
+    return Ret;
   }
 
   Chain = DAG.getNode(RISCVISD::CALL, DL, NodeTys, Ops);
   DAG.addNoMergeSiteInfo(Chain.getNode(), CLI.NoMerge);
   Glue = Chain.getValue(1);
+
+  DAG.addCallSiteInfo(Chain.getNode(), std::move(CSInfo));
 
   // Mark the end of the call, which is glued to the call itself.
   Chain = DAG.getCALLSEQ_END(Chain,
