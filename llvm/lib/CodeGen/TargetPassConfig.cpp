@@ -131,6 +131,11 @@ static cl::opt<cl::boolOrDefault> DebugifyCheckAndStripAll(
         "Debugify MIR before, by checking and stripping the debug info after, "
         "each pass except those known to be unsafe when debug info is "
         "present"));
+static cl::opt<bool>
+    EnableCollectAndCheckMIRDebugInfo("enable-collect-and-check-mir-debug-info", cl::Hidden, cl::init(false),
+                        cl::desc("Collect debug info before and check after "
+                                 "each pass except those known to be unsafe "
+                                 "when debug info is present (-g)"));
 // Enable or disable the MachineOutliner.
 static cl::opt<RunOutliner> EnableMachineOutliner(
     "enable-machine-outliner", cl::desc("Enable the machine outliner"),
@@ -599,6 +604,13 @@ TargetPassConfig::TargetPassConfig(LLVMTargetMachine &TM, PassManagerBase &pm)
     TM.Options.GlobalISelAbort = EnableGlobalISelAbort;
 
   setStartStopPasses();
+
+  if (EnableCollectAndCheckMIRDebugInfo) {
+      Mode = MIRDebugifyMode::OriginalDebugInfo;
+  } else if (DebugifyAndStripAll == cl::BOU_TRUE || DebugifyCheckAndStripAll == cl::BOU_TRUE) {
+      Mode = MIRDebugifyMode::SyntheticDebugInfo;
+  }
+
 }
 
 CodeGenOptLevel TargetPassConfig::getOptLevel() const {
@@ -778,31 +790,33 @@ void TargetPassConfig::addVerifyPass(const std::string &Banner) {
 }
 
 void TargetPassConfig::addDebugifyPass() {
-  PM->add(createDebugifyMachineModulePass());
+  PM->add(createDebugifyMachineModulePass(DbgInfoPerMIRPass, Mode));
 }
 
 void TargetPassConfig::addStripDebugPass() {
   PM->add(createStripDebugMachineModulePass(/*OnlyDebugified=*/true));
 }
 
-void TargetPassConfig::addCheckDebugPass() {
-  PM->add(createCheckDebugMachineModulePass());
+void TargetPassConfig::addCheckDebugPass(const std::string &Banner) {
+  PM->add(createCheckDebugMachineModulePass(DbgInfoPerMIRPass, Mode, Banner));
 }
 
 void TargetPassConfig::addMachinePrePasses(bool AllowDebugify) {
   if (AllowDebugify && DebugifyIsSafe &&
       (DebugifyAndStripAll == cl::BOU_TRUE ||
-       DebugifyCheckAndStripAll == cl::BOU_TRUE))
+       DebugifyCheckAndStripAll == cl::BOU_TRUE || EnableCollectAndCheckMIRDebugInfo))
     addDebugifyPass();
 }
 
 void TargetPassConfig::addMachinePostPasses(const std::string &Banner) {
   if (DebugifyIsSafe) {
     if (DebugifyCheckAndStripAll == cl::BOU_TRUE) {
-      addCheckDebugPass();
+      addCheckDebugPass(Banner);
       addStripDebugPass();
     } else if (DebugifyAndStripAll == cl::BOU_TRUE)
       addStripDebugPass();
+    else if (EnableCollectAndCheckMIRDebugInfo) 
+      addCheckDebugPass(Banner);
   }
   addVerifyPass(Banner);
 }

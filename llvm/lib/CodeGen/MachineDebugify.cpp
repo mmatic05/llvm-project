@@ -183,6 +183,38 @@ bool applyDebugifyMetadataToMachineFunction(MachineModuleInfo &MMI,
   return true;
 }
 
+static bool collectMIRDebugInfoMetadata(MachineModuleInfo &MMI, Module &M, DebugInfoPerMIRPass *DbgInfoPerMIRPass) {
+    DbgInfoPerMIRPass->InstToDelete.clear();
+    DbgInfoPerMIRPass->DILocations.clear();
+
+    for (Function &F : M.functions()) {
+      MachineFunction *MF = MMI.getMachineFunction(F);
+      if (!MF)
+        continue;
+      for (MachineBasicBlock &MBB : *MF) {
+        // Collect dbgLoc.
+        for (MachineInstr &MI : MBB) {
+          if (MI.isDebugValue())
+            continue;
+
+          LLVM_DEBUG(dbgs() << "  Collecting info for mir inst: " << MI << '\n');
+          DbgInfoPerMIRPass->InstToDelete.insert({&MI, MI.getDebugInstrNum()});
+
+          const DebugLoc DL = MI.getDebugLoc();
+          bool HasLoc = DL && DL.getLine() != 0;
+          if (HasLoc) {
+          DbgInfoPerMIRPass->DILocations.insert({&MI,DL.getLine()});         
+          } else {
+          DbgInfoPerMIRPass->DILocations.insert({&MI,0});         
+          }      
+
+        }
+      }
+    }
+
+  return false;
+}
+
 /// ModulePass for attaching synthetic debug info to everything, used with the
 /// legacy module pass manager.
 struct DebugifyMachineModule : public ModulePass {
@@ -192,14 +224,28 @@ struct DebugifyMachineModule : public ModulePass {
            "llvm.mir.debugify metadata already exists! Strip it first");
     MachineModuleInfo &MMI =
         getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
+
+    if (Mode == MIRDebugifyMode::SyntheticDebugInfo) {
     return applyDebugifyMetadata(
         M, M.functions(),
         "ModuleDebugify: ", [&](DIBuilder &DIB, Function &F) -> bool {
           return applyDebugifyMetadataToMachineFunction(MMI, DIB, F);
         });
+    } else if (Mode == MIRDebugifyMode::OriginalDebugInfo) {
+      return collectMIRDebugInfoMetadata(MMI, M, DbgInfoPerMIRPass);
+    }
+    return false;
+
   }
 
-  DebugifyMachineModule() : ModulePass(ID) {}
+  DebugifyMachineModule() : ModulePass(ID) {
+    Mode = MIRDebugifyMode::SyntheticDebugInfo;
+  }
+
+  DebugifyMachineModule(DebugInfoPerMIRPass *DbgInfoPerMIRPass, MIRDebugifyMode DebugifyMode) : ModulePass(ID) {
+    this->DbgInfoPerMIRPass = DbgInfoPerMIRPass; // only for origin mode 
+    Mode = DebugifyMode;
+  }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<MachineModuleInfoWrapperPass>();
@@ -208,6 +254,10 @@ struct DebugifyMachineModule : public ModulePass {
   }
 
   static char ID; // Pass identification.
+  MIRDebugifyMode Mode;
+
+  //valid only for origin debugify mode
+  DebugInfoPerMIRPass *DbgInfoPerMIRPass;
 };
 char DebugifyMachineModule::ID = 0;
 
@@ -218,6 +268,6 @@ INITIALIZE_PASS_BEGIN(DebugifyMachineModule, DEBUG_TYPE,
 INITIALIZE_PASS_END(DebugifyMachineModule, DEBUG_TYPE,
                     "Machine Debugify Module", false, false)
 
-ModulePass *llvm::createDebugifyMachineModulePass() {
-  return new DebugifyMachineModule();
+ModulePass *llvm::createDebugifyMachineModulePass(DebugInfoPerMIRPass *DbgInfoPerMIRPass, MIRDebugifyMode Mode) {
+  return new DebugifyMachineModule(DbgInfoPerMIRPass, Mode);
 }

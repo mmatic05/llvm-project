@@ -15,6 +15,11 @@
 
 #include "llvm/Pass.h"
 #include "llvm/Support/CodeGen.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/CodeGen/MachineDebugify.h"
 #include "llvm/Support/Error.h"
 #include <cassert>
 #include <string>
@@ -106,6 +111,12 @@ private:
   bool Stopped = false;
   bool AddingMachinePasses = false;
   bool DebugifyIsSafe = true;
+
+// Machine Debugify Info
+  enum MIRDebugifyMode Mode = MIRDebugifyMode::NoDebugify;
+  DebugInfoPerMIRPass DbgInfoMIRPasses = DebugInfoPerMIRPass();
+  DebugInfoPerMIRPass *DbgInfoPerMIRPass = &DbgInfoMIRPasses;
+
 
   /// Set the StartAfter, StartBefore and StopAfter passes to allow running only
   /// a portion of the normal code-gen pass sequence.
@@ -339,7 +350,7 @@ public:
   void addStripDebugPass();
 
   /// Add a pass to check synthesized debug info for MIR.
-  void addCheckDebugPass();
+  void addCheckDebugPass(const std::string &Banner);
 
   /// Add standard passes before a pass that's about to be added. For example,
   /// the DebugifyMachineModulePass if it is enabled.
@@ -365,6 +376,23 @@ public:
 
   /// Returns the CSEConfig object to use for the current optimization level.
   virtual std::unique_ptr<CSEConfigBase> getCSEConfig() const;
+
+
+  void setDebugInfoBeforeMIRPass(struct DebugInfoPerMIRPass *PerPassDI) {
+    DbgInfoPerMIRPass = PerPassDI;
+  }
+
+  void setMIRDebugifyMode(enum MIRDebugifyMode M) { Mode = M; }
+
+  bool isSyntheticDebugInfo() const {
+    return Mode == MIRDebugifyMode::SyntheticDebugInfo;
+  }
+  bool isOriginalDebugInfoMode() const {
+    return Mode == MIRDebugifyMode::OriginalDebugInfo;
+  }
+
+  struct DebugInfoPerMIRPass *getDebugInfoPerMIRPass() { return DbgInfoPerMIRPass; }
+
 
 protected:
   // Helper to verify the analysis is really immutable.

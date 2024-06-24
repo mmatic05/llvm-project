@@ -17,6 +17,7 @@
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Discriminator.h"
 #include "llvm/CodeGen/RegAllocCommon.h"
+#include "llvm/CodeGen/TargetPassConfig.h"
 
 #include <functional>
 #include <string>
@@ -567,7 +568,7 @@ namespace llvm {
                              IntrusiveRefCntPtr<vfs::FileSystem> FS);
 
   /// Creates MIR Debugify pass. \see MachineDebugify.cpp
-  ModulePass *createDebugifyMachineModulePass();
+  ModulePass *createDebugifyMachineModulePass(DebugInfoPerMIRPass *DbgInfoPerMIRPass, MIRDebugifyMode Mode);
 
   /// Creates MIR Strip Debug pass. \see MachineStripDebug.cpp
   /// If OnlyDebugified is true then it will only strip debug info if it was
@@ -576,7 +577,7 @@ namespace llvm {
   ModulePass *createStripDebugMachineModulePass(bool OnlyDebugified);
 
   /// Creates MIR Check Debug pass. \see MachineCheckDebugify.cpp
-  ModulePass *createCheckDebugMachineModulePass();
+  ModulePass *createCheckDebugMachineModulePass(DebugInfoPerMIRPass *DbgInfoPerMIRPass, MIRDebugifyMode Mode, const std::string &Banner);
 
   /// The pass fixups statepoint machine instruction to replace usage of
   /// caller saved registers with stack slots.

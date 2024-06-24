@@ -28,8 +28,7 @@ using namespace llvm;
 
 namespace {
 
-struct CheckDebugMachineModule : public ModulePass {
-  bool runOnModule(Module &M) override {
+static bool checkMIRDebugifyMetadata(MachineModuleInfo &MMI, Module &M) {
     NamedMDNode *NMD = M.getNamedMetadata("llvm.mir.debugify");
     if (!NMD) {
       errs() << "WARNING: Please run mir-debugify to generate "
@@ -37,8 +36,6 @@ struct CheckDebugMachineModule : public ModulePass {
       return false;
     }
 
-    MachineModuleInfo &MMI =
-        getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
 
     auto getDebugifyOperand = [&](unsigned Idx) -> unsigned {
       return mdconst::extract<ConstantInt>(NMD->getOperand(Idx)->getOperand(0))
@@ -102,10 +99,104 @@ struct CheckDebugMachineModule : public ModulePass {
     errs() << "Machine IR debug info check: ";
     errs() << (Fail ? "FAIL" : "PASS") << "\n";
 
-    return false;
+    return false; 
   }
 
-  CheckDebugMachineModule() : ModulePass(ID) {}
+static bool checkMIRInstructions(const DebugMIRInstMap &DILocsBefore,
+                              const DebugMIRInstMap &DILocsAfter,
+                              const WeakMIRInstValueMap &InstToDelete,
+                              StringRef NameOfWrappedPass) {
+  bool Preserved = true;
+  for (auto &L : DILocsAfter) {
+    // Instr have dbgLoc after pass
+    if (L.second != 0)
+      continue;
+
+    auto MIRInstrAfter = L.first;
+
+    // In order to avoid pointer reuse/recycling, skip the values that might
+    // have been deleted during a pass.
+    auto WeakInstrPtr = InstToDelete.find(MIRInstrAfter);
+    unsigned debugInstrNum = MIRInstrAfter->getDebugInstrNum();
+    if (WeakInstrPtr != InstToDelete.end() && WeakInstrPtr->second != debugInstrNum)
+      continue;
+
+    auto InstrIt = DILocsBefore.find(MIRInstrAfter);
+
+    // Wrapped pass added new instr without dbgLoc
+    if (InstrIt == DILocsBefore.end())
+      continue; 
+
+    // Instr didn't have dbgLoc before pass
+    if (InstrIt->second == 0)
+      continue;
+
+    Preserved = false;
+    errs() << "WARNING: Missing line " << InstrIt->second << "\n";  
+  }
+
+  return Preserved;
+}
+
+
+static bool checkMIRDebugInfoMetadata(MachineModuleInfo &MMI, Module &M, StringRef NameOfWrappedPass, DebugInfoPerMIRPass * DbgInfoBeforeMIRPass) {
+    DebugMIRInstMap DbgInfoAfterMIRPass;
+    
+    for (Function &F : M.functions()) {
+      MachineFunction *MF = MMI.getMachineFunction(F);
+      if (!MF)
+        continue;
+      for (MachineBasicBlock &MBB : *MF) {
+
+        // Cllect dbgLoc.
+        for (MachineInstr &MI : MBB) {
+          if (MI.isDebugValue())
+            continue;
+          
+          const DebugLoc DL = MI.getDebugLoc();
+          bool HasLoc = DL && DL.getLine() != 0;
+          if (HasLoc) {
+            DbgInfoAfterMIRPass.insert({&MI,DL.getLine()});         
+          } else {
+            DbgInfoAfterMIRPass.insert({&MI,0});         
+          }
+        }
+      }
+    }
+
+  bool ResultForInsts = checkMIRInstructions(DbgInfoBeforeMIRPass->DILocations, DbgInfoAfterMIRPass, DbgInfoBeforeMIRPass->InstToDelete, NameOfWrappedPass);
+
+  if (ResultForInsts)
+    errs() << "Machine IR debug info check: PASS\n";
+  else
+    errs() << "Machine IR debug info check: FAIL\n";
+
+  return false;
+  }
+
+struct CheckDebugMachineModule : public ModulePass {
+  bool runOnModule(Module &M) override {
+
+  MachineModuleInfo &MMI = getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
+
+  if (Mode == MIRDebugifyMode::SyntheticDebugInfo) {
+     return checkMIRDebugifyMetadata(MMI, M);
+    } else if (Mode == MIRDebugifyMode::OriginalDebugInfo) {
+     return checkMIRDebugInfoMetadata(MMI, M, NameOfWrappedPass, DbgInfoBeforeMIRPass);
+    }
+
+  return false;
+  }
+
+  CheckDebugMachineModule() : ModulePass(ID) {
+    Mode = MIRDebugifyMode::SyntheticDebugInfo;
+  }
+
+  CheckDebugMachineModule(DebugInfoPerMIRPass *DbgInfoPerMIRPass, MIRDebugifyMode DebugifyMode, const std::string &Banner) : ModulePass(ID) {
+    DbgInfoBeforeMIRPass = DbgInfoPerMIRPass;
+    Mode = DebugifyMode;
+    NameOfWrappedPass = Banner;
+  }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<MachineModuleInfoWrapperPass>();
@@ -113,6 +204,11 @@ struct CheckDebugMachineModule : public ModulePass {
   }
 
   static char ID; // Pass identification.
+  MIRDebugifyMode Mode;
+
+  //valid only for origin debugify mode
+  DebugInfoPerMIRPass *DbgInfoBeforeMIRPass;
+  std::string NameOfWrappedPass;
 };
 char CheckDebugMachineModule::ID = 0;
 
@@ -123,6 +219,6 @@ INITIALIZE_PASS_BEGIN(CheckDebugMachineModule, DEBUG_TYPE,
 INITIALIZE_PASS_END(CheckDebugMachineModule, DEBUG_TYPE,
                     "Machine Check Debug Module", false, false)
 
-ModulePass *llvm::createCheckDebugMachineModulePass() {
-  return new CheckDebugMachineModule();
+ModulePass *llvm::createCheckDebugMachineModulePass(DebugInfoPerMIRPass *DbgInfoPerMIRPass, MIRDebugifyMode Mode, const std::string &Banner) {
+  return new CheckDebugMachineModule(DbgInfoPerMIRPass, Mode, Banner);
 }
